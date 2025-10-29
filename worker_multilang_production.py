@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-Production Multilang Worker - Implementing Best Practices
-- Configurable timeout with exponential backoff
-- Separate DB columns for clean state management
-- Idempotent operations with proper cleanup
-- Consistent summarizer design
+Production Multilang Worker - Fixed Version
+- Process audio and send menu (no waiting)
+- Separate job handles summary generation
 """
 
 import os
@@ -12,7 +10,6 @@ import tempfile
 import requests
 import traceback
 import json
-import time
 import signal
 from dotenv import load_dotenv
 
@@ -22,10 +19,6 @@ from db import get_conn
 from utils import send_whatsapp
 from openai_client_multilang import transcribe_file_multilang, summarize_text_multilang
 from language_handler_v2 import get_language_menu, get_language_name
-
-# Configuration
-LANG_CHOICE_TIMEOUT = int(os.getenv("LANG_CHOICE_TIMEOUT", "45"))
-MAX_BACKOFF = 8  # seconds
 
 class GracefulKiller:
     """Handle SIGTERM for graceful shutdown"""
@@ -73,42 +66,8 @@ def _detect_language_from_transcript(transcript):
     
     return 'hi'  # Default to Hindi
 
-def _wait_for_language_choice(phone, meeting_id, timeout=LANG_CHOICE_TIMEOUT):
-    """Wait for language choice with exponential backoff"""
-    print(f"🌐 WORKER: Waiting for language choice (timeout: {timeout}s)")
-    
-    start_time = time.time()
-    backoff = 1
-    
-    while time.time() - start_time < timeout and not killer.kill_now:
-        try:
-            with get_conn() as conn, conn.cursor() as cur:
-                # Poll dedicated column instead of JSON parsing
-                cur.execute("SELECT chosen_language FROM meeting_notes WHERE phone=%s AND id=%s", (phone, meeting_id))
-                row = cur.fetchone()
-                
-                if row and row[0]:
-                    chosen_lang = row[0]
-                    print(f"🌐 WORKER: Language selected: {chosen_lang}")
-                    return chosen_lang
-            
-            # Exponential backoff: 1s → 2s → 4s → 8s
-            time.sleep(min(backoff, MAX_BACKOFF))
-            backoff = min(backoff * 2, MAX_BACKOFF)
-            
-        except Exception as e:
-            print(f"🌐 WORKER: Error checking language choice: {e}")
-            time.sleep(2)
-    
-    if killer.kill_now:
-        print("🌐 WORKER: Graceful shutdown requested")
-        return None
-    
-    print(f"🌐 WORKER: Timeout after {timeout}s")
-    return None
-
 def process_audio_job(meeting_id, media_url):
-    """Process audio and wait for language selection"""
+    """Process audio and send language menu (no waiting)"""
     print(f"🌐 PRODUCTION WORKER: Processing meeting_id={meeting_id}")
     tmp_path = None
     
@@ -133,27 +92,60 @@ def process_audio_job(meeting_id, media_url):
         resp = requests.get(audio_url, auth=auth, timeout=60)
         resp.raise_for_status()
         
-        # Save to temp file
+        # Check file size
+        file_size_mb = len(resp.content) / (1024 * 1024)
+        if file_size_mb > 24:
+            raise ValueError(f"Audio file too large: {file_size_mb:.2f}MB (max 25MB)")
+        
+        # Save to temp file with proper format detection
         content_type = resp.headers.get('Content-Type', '')
-        suffix = '.opus' if 'opus' in content_type.lower() else '.mp3'
+        if 'opus' in content_type.lower():
+            suffix = '.opus'
+        elif 'ogg' in content_type.lower():
+            suffix = '.ogg'
+        elif 'm4a' in content_type.lower():
+            suffix = '.m4a'
+        elif 'wav' in content_type.lower():
+            suffix = '.wav'
+        else:
+            suffix = '.mp3'
         
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(resp.content)
             tmp_path = tmp.name
         
-        # Transcribe
-        transcript = transcribe_file_multilang(tmp_path, language=None)
-        detected_language = _detect_language_from_transcript(transcript)
+        # Transcribe with error handling
+        print(f"🌐 PRODUCTION WORKER: Starting transcription...")
+        try:
+            transcript = transcribe_file_multilang(tmp_path, language=None)
+            print(f"🌐 PRODUCTION WORKER: Transcription complete, length: {len(transcript) if transcript else 0}")
+            
+            if not transcript or len(transcript.strip()) < 5:
+                raise ValueError("Transcription failed or too short")
+            
+        except Exception as transcribe_error:
+            print(f"🌐 PRODUCTION WORKER: Transcription failed: {transcribe_error}")
+            raise
         
-        # Calculate credits
+        # Detect language
+        detected_language = _detect_language_from_transcript(transcript)
+        print(f"🌐 PRODUCTION WORKER: Detected language: {detected_language}")
+        
+        # Calculate duration for credits
         try:
             from mutagen import File as MutagenFile
             mf = MutagenFile(tmp_path)
-            minutes = round(float(mf.info.length) / 60.0, 2) if mf and hasattr(mf, 'info') else 1.0
-        except:
+            if mf and hasattr(mf, 'info') and hasattr(mf.info, 'length'):
+                duration_seconds = float(mf.info.length)
+            else:
+                # Fallback calculation based on file size and bitrate
+                duration_seconds = (len(resp.content) * 8) / 80000
+            minutes = round(duration_seconds / 60.0, 2)
+        except Exception as duration_error:
+            print(f"🌐 PRODUCTION WORKER: Duration calculation failed: {duration_error}")
             minutes = 1.0
         
-        # Store in separate columns (clean state management)
+        # Store in separate columns
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("""
                 UPDATE meeting_notes 
@@ -170,52 +162,28 @@ def process_audio_job(meeting_id, media_url):
             
             conn.commit()
         
-        # Send language menu
+        # Send language menu and END JOB
         detected_name = get_language_name(detected_language)
         menu = get_language_menu()
         
         message = f"🎙️ *Audio transcribed!*\n🔍 Detected: *{detected_name}*\n\n📝 *Choose summary language:*\n\n{menu}"
         send_whatsapp(phone, message)
         
-        # Wait for language choice with configurable timeout
-        chosen_language = _wait_for_language_choice(phone, meeting_id, LANG_CHOICE_TIMEOUT)
-        
-        if not chosen_language:
-            # Timeout fallback to English
-            chosen_language = 'en'
-            send_whatsapp(phone, f"⏰ No response in {LANG_CHOICE_TIMEOUT}s. Using English...")
-        
-        # Generate summary (consistent design - always use multilang)
-        summary = summarize_text_multilang(transcript, chosen_language)
-        
-        # Idempotent final update with timestamp
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("""
-                UPDATE meeting_notes 
-                SET summary=%s, chosen_language=%s, job_state=%s, summary_generated_at=NOW()
-                WHERE id=%s AND summary_generated_at IS NULL
-            """, (summary, chosen_language, 'completed', meeting_id))
-            
-            # Check if we actually updated (idempotent)
-            if cur.rowcount > 0:
-                lang_name = get_language_name(chosen_language)
-                header = f"📝 *Meeting Summary ({lang_name}):*\n\n"
-                send_whatsapp(phone, header + summary)
-                print(f"🌐 WORKER: Summary sent in {lang_name}")
-            else:
-                print("🌐 WORKER: Summary already generated (idempotent)")
-            
-            conn.commit()
-        
-        return {"success": True, "language": chosen_language}
+        print(f"🌐 WORKER: Language menu sent, job complete")
+        return {"success": True, "transcript_ready": True}
         
     except Exception as e:
-        print(f"🌐 WORKER ERROR: {e}")
+        print(f"🌐 PRODUCTION WORKER: Error: {e}")
         traceback.print_exc()
+        try:
+            if 'phone' in locals():
+                send_whatsapp(phone, "⚠️ Processing failed. Please try again.")
+        except:
+            pass
         return {"error": str(e)}
         
     finally:
-        # Ensure cleanup in finally block
+        # Cleanup
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
@@ -224,28 +192,64 @@ def process_audio_job(meeting_id, media_url):
                 print(f"🌐 WORKER: Cleanup failed: {e}")
 
 def complete_summary_job(meeting_id, chosen_language):
-    """Separate job for summary completion (if needed)"""
+    """Generate summary in chosen language"""
     print(f"🌐 COMPLETING SUMMARY: meeting_id={meeting_id}, language={chosen_language}")
     
     try:
         with get_conn() as conn, conn.cursor() as cur:
-            # Atomic language choice update
+            # Get transcript and update language choice
+            cur.execute("""
+                SELECT phone, transcript FROM meeting_notes 
+                WHERE id=%s
+            """, (meeting_id,))
+            row = cur.fetchone()
+            
+            if not row:
+                return {"error": "Meeting not found"}
+            
+            phone = row[0] if hasattr(row, '__getitem__') else row.phone
+            transcript = row[1] if hasattr(row, '__getitem__') else row.transcript
+            
+            # Generate summary with error handling
+            print(f"🌐 PRODUCTION WORKER: Generating summary in {chosen_language}...")
+            try:
+                summary = summarize_text_multilang(transcript, chosen_language)
+                print(f"🌐 PRODUCTION WORKER: Summary generated, length: {len(summary) if summary else 0}")
+                
+                if not summary or len(summary.strip()) < 10:
+                    raise ValueError("Summary generation failed or too short")
+                    
+            except Exception as summary_error:
+                print(f"🌐 PRODUCTION WORKER: Summary generation failed: {summary_error}")
+                raise
+            
+            # Idempotent final update with timestamp
             cur.execute("""
                 UPDATE meeting_notes 
-                SET chosen_language=%s, job_state=%s
-                WHERE id=%s AND chosen_language IS NULL
-            """, (chosen_language, 'language_selected', meeting_id))
-            conn.commit()
+                SET summary=%s, chosen_language=%s, job_state=%s, summary_generated_at=NOW()
+                WHERE id=%s AND summary_generated_at IS NULL
+            """, (summary, chosen_language, 'completed', meeting_id))
             
+            # Check if we actually updated (idempotent)
             if cur.rowcount > 0:
-                print(f"🌐 WORKER: Language choice stored: {chosen_language}")
-                return {"success": True}
+                conn.commit()
+                lang_name = get_language_name(chosen_language)
+                header = f"📝 *Meeting Summary ({lang_name}):*\n\n"
+                send_whatsapp(phone, header + summary)
+                print(f"🌐 WORKER: Summary sent in {lang_name}")
             else:
-                print("🌐 WORKER: Language already chosen (idempotent)")
-                return {"success": True, "already_set": True}
+                print("🌐 WORKER: Summary already generated (idempotent)")
+            
+            return {"success": True, "language": chosen_language}
         
     except Exception as e:
-        print(f"🌐 SUMMARY ERROR: {e}")
+        print(f"🌐 PRODUCTION WORKER: Summary completion error: {e}")
+        traceback.print_exc()
+        try:
+            if 'phone' in locals():
+                send_whatsapp(phone, "⚠️ Failed to generate summary. Please try again.")
+        except:
+            pass
         return {"error": str(e)}
 
 def test_worker_job():
