@@ -68,7 +68,7 @@ def _detect_language_from_transcript(transcript):
 
 def process_audio_job(meeting_id, media_url):
     """Process audio and send language menu (no waiting)"""
-    print(f"🌐 PRODUCTION WORKER: Processing meeting_id={meeting_id}")
+    print(f"PRODUCTION WORKER: Processing meeting_id={meeting_id}")
     tmp_path = None
     
     try:
@@ -97,39 +97,110 @@ def process_audio_job(meeting_id, media_url):
         if file_size_mb > 24:
             raise ValueError(f"Audio file too large: {file_size_mb:.2f}MB (max 25MB)")
         
-        # Save to temp file with proper format detection
-        content_type = resp.headers.get('Content-Type', '')
-        if 'opus' in content_type.lower():
-            suffix = '.opus'
-        elif 'ogg' in content_type.lower():
-            suffix = '.ogg'
-        elif 'm4a' in content_type.lower():
+        # Save to temp file with OpenAI-compatible format detection
+        content_type = resp.headers.get('Content-Type', '').lower()
+        
+        # Map content types to OpenAI-supported formats
+        if any(x in content_type for x in ['m4a', 'mp4', 'aac']):
             suffix = '.m4a'
-        elif 'wav' in content_type.lower():
+        elif 'wav' in content_type:
             suffix = '.wav'
+        elif any(x in content_type for x in ['ogg', 'opus']):
+            suffix = '.ogg'
+        elif 'webm' in content_type:
+            suffix = '.webm'
+        elif 'flac' in content_type:
+            suffix = '.flac'
         else:
+            # Default to mp3 for unknown formats
             suffix = '.mp3'
+        
+        # Enhanced logging for diagnostics
+        first_bytes = resp.content[:16] if len(resp.content) >= 16 else resp.content
+        print(f"WORKER: Content-Type: {content_type}, using suffix: {suffix}")
+        print(f"WORKER: First 16 bytes: {first_bytes.hex() if first_bytes else 'empty'}")
         
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(resp.content)
             tmp_path = tmp.name
+            
+        # Verify file is not empty and has reasonable size
+        file_size = os.path.getsize(tmp_path)
+        print(f"WORKER: Saved audio file: {tmp_path}, size: {file_size} bytes")
         
-        # Transcribe with error handling
-        print(f"🌐 PRODUCTION WORKER: Starting transcription...")
+        if file_size < 100:  # Less than 100 bytes is likely not valid audio
+            raise ValueError(f"Audio file too small: {file_size} bytes")
+        
+        # Proactive transcoding for better compatibility (optional)
+        proactive_transcode = os.getenv("PROACTIVE_TRANSCODE", "false").lower() == "true"
+        if proactive_transcode and suffix not in ['.wav', '.mp3', '.m4a']:
+            print(f"WORKER: Proactively converting {suffix} to WAV...")
+            try:
+                import subprocess
+                wav_path = tmp_path.replace(suffix, '.wav')
+                result = subprocess.run([
+                    'ffmpeg', '-i', tmp_path, '-acodec', 'pcm_s16le', 
+                    '-ar', '16000', '-ac', '1', wav_path, '-y'
+                ], capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0 and os.path.exists(wav_path):
+                    print(f"WORKER: Proactive conversion successful: {wav_path}")
+                    os.remove(tmp_path)
+                    tmp_path = wav_path
+                else:
+                    print(f"WORKER: Proactive conversion failed, using original")
+            except Exception as conv_error:
+                print(f"WORKER: Proactive conversion error: {conv_error}")
+        
+        # Transcribe with enhanced error handling
+        print(f"PRODUCTION WORKER: Starting transcription for file: {tmp_path}")
         try:
+            # Try transcription with automatic language detection
             transcript = transcribe_file_multilang(tmp_path, language=None)
-            print(f"🌐 PRODUCTION WORKER: Transcription complete, length: {len(transcript) if transcript else 0}")
+            print(f"PRODUCTION WORKER: Transcription complete, length: {len(transcript) if transcript else 0}")
             
             if not transcript or len(transcript.strip()) < 5:
                 raise ValueError("Transcription failed or too short")
-            
+                
         except Exception as transcribe_error:
-            print(f"🌐 PRODUCTION WORKER: Transcription failed: {transcribe_error}")
-            raise
+            print(f"PRODUCTION WORKER: Transcription failed: {transcribe_error}")
+            
+            # Try converting to a more compatible format if transcription fails
+            if "Invalid file format" in str(transcribe_error):
+                print(f"WORKER: Attempting format conversion...")
+                try:
+                    # Convert to WAV format using ffmpeg if available
+                    import subprocess
+                    wav_path = tmp_path.replace(suffix, '.wav')
+                    result = subprocess.run([
+                        'ffmpeg', '-i', tmp_path, '-acodec', 'pcm_s16le', 
+                        '-ar', '16000', '-ac', '1', wav_path, '-y'
+                    ], capture_output=True, text=True, timeout=30)
+                    
+                    if result.returncode == 0 and os.path.exists(wav_path):
+                        print(f"WORKER: Converted to WAV: {wav_path}")
+                        # Clean up original file
+                        os.remove(tmp_path)
+                        tmp_path = wav_path
+                        
+                        # Retry transcription with converted file
+                        transcript = transcribe_file_multilang(tmp_path, language=None)
+                        print(f"PRODUCTION WORKER: Transcription after conversion complete, length: {len(transcript) if transcript else 0}")
+                        
+                        if not transcript or len(transcript.strip()) < 5:
+                            raise ValueError("Transcription failed after conversion")
+                    else:
+                        raise transcribe_error
+                        
+                except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as conv_error:
+                    print(f"WORKER: Format conversion failed: {conv_error}")
+                    raise transcribe_error
+            else:
+                raise
         
         # Detect language
         detected_language = _detect_language_from_transcript(transcript)
-        print(f"🌐 PRODUCTION WORKER: Detected language: {detected_language}")
+        print(f"PRODUCTION WORKER: Detected language: {detected_language}")
         
         # Calculate duration for credits
         try:
@@ -142,7 +213,7 @@ def process_audio_job(meeting_id, media_url):
                 duration_seconds = (len(resp.content) * 8) / 80000
             minutes = round(duration_seconds / 60.0, 2)
         except Exception as duration_error:
-            print(f"🌐 PRODUCTION WORKER: Duration calculation failed: {duration_error}")
+            print(f"PRODUCTION WORKER: Duration calculation failed: {duration_error}")
             minutes = 1.0
         
         # Store in separate columns
@@ -166,18 +237,18 @@ def process_audio_job(meeting_id, media_url):
         detected_name = get_language_name(detected_language)
         menu = get_language_menu()
         
-        message = f"🎙️ *Audio transcribed!*\n🔍 Detected: *{detected_name}*\n\n📝 *Choose summary language:*\n\n{menu}"
+        message = f"Audio transcribed!\nDetected: {detected_name}\n\nChoose summary language:\n\n{menu}"
         send_whatsapp(phone, message)
         
-        print(f"🌐 WORKER: Language menu sent, job complete")
+        print(f"WORKER: Language menu sent, job complete")
         return {"success": True, "transcript_ready": True}
         
     except Exception as e:
-        print(f"🌐 PRODUCTION WORKER: Error: {e}")
+        print(f"PRODUCTION WORKER: Error: {e}")
         traceback.print_exc()
         try:
             if 'phone' in locals():
-                send_whatsapp(phone, "⚠️ Processing failed. Please try again.")
+                send_whatsapp(phone, "Processing failed. Please try again.")
         except:
             pass
         return {"error": str(e)}
@@ -187,13 +258,13 @@ def process_audio_job(meeting_id, media_url):
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
-                print(f"🌐 WORKER: Cleaned up {tmp_path}")
+                print(f"WORKER: Cleaned up {tmp_path}")
             except Exception as e:
-                print(f"🌐 WORKER: Cleanup failed: {e}")
+                print(f"WORKER: Cleanup failed: {e}")
 
 def complete_summary_job(meeting_id, chosen_language):
     """Generate summary in chosen language"""
-    print(f"🌐 COMPLETING SUMMARY: meeting_id={meeting_id}, language={chosen_language}")
+    print(f"COMPLETING SUMMARY: meeting_id={meeting_id}, language={chosen_language}")
     
     try:
         with get_conn() as conn, conn.cursor() as cur:
@@ -210,48 +281,49 @@ def complete_summary_job(meeting_id, chosen_language):
             phone = row[0] if hasattr(row, '__getitem__') else row.phone
             transcript = row[1] if hasattr(row, '__getitem__') else row.transcript
             
+            if not transcript:
+                return {"error": "No transcript found"}
+            
             # Generate summary with error handling
-            print(f"🌐 PRODUCTION WORKER: Generating summary in {chosen_language}...")
+            print(f"PRODUCTION WORKER: Generating summary in {chosen_language}...")
             try:
                 summary = summarize_text_multilang(transcript, chosen_language)
-                print(f"🌐 PRODUCTION WORKER: Summary generated, length: {len(summary) if summary else 0}")
+                print(f"PRODUCTION WORKER: Summary generated, length: {len(summary) if summary else 0}")
                 
                 if not summary or len(summary.strip()) < 10:
                     raise ValueError("Summary generation failed or too short")
                     
             except Exception as summary_error:
-                print(f"🌐 PRODUCTION WORKER: Summary generation failed: {summary_error}")
+                print(f"PRODUCTION WORKER: Summary generation failed: {summary_error}")
                 raise
+            
+            # Send summary to user
+            lang_name = get_language_name(chosen_language)
+            formatted_summary = f"Meeting Summary ({lang_name}):\n\n{summary}"
+            send_whatsapp(phone, formatted_summary)
             
             # Idempotent final update with timestamp
             cur.execute("""
                 UPDATE meeting_notes 
-                SET summary=%s, chosen_language=%s, job_state=%s, summary_generated_at=NOW()
-                WHERE id=%s AND summary_generated_at IS NULL
+                SET summary=%s, chosen_language=%s, job_state=%s, summary_generated_at=now()
+                WHERE id=%s
             """, (summary, chosen_language, 'completed', meeting_id))
             
-            # Check if we actually updated (idempotent)
-            if cur.rowcount > 0:
-                conn.commit()
-                lang_name = get_language_name(chosen_language)
-                header = f"📝 *Meeting Summary ({lang_name}):*\n\n"
-                send_whatsapp(phone, header + summary)
-                print(f"🌐 WORKER: Summary sent in {lang_name}")
-            else:
-                print("🌐 WORKER: Summary already generated (idempotent)")
+            conn.commit()
             
-            return {"success": True, "language": chosen_language}
+        print(f"WORKER: Summary sent and job completed")
+        return {"success": True, "summary_sent": True}
         
     except Exception as e:
-        print(f"🌐 PRODUCTION WORKER: Summary completion error: {e}")
+        print(f"PRODUCTION WORKER: Summary generation error: {e}")
         traceback.print_exc()
         try:
             if 'phone' in locals():
-                send_whatsapp(phone, "⚠️ Failed to generate summary. Please try again.")
+                send_whatsapp(phone, "Summary generation failed. Please try again.")
         except:
             pass
         return {"error": str(e)}
 
 def test_worker_job():
-    print("🧪 PRODUCTION MULTILANG WORKER TEST SUCCESS!")
+    print("PRODUCTION MULTILANG WORKER TEST SUCCESS!")
     return "test_success"
