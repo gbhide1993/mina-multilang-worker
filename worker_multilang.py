@@ -154,7 +154,6 @@ def process_audio_job_multilang(meeting_id, media_url):
                 conn.commit()
         
         # Send language selection menu to user
-        from language_handler_v2 import get_language_menu, get_language_name
         detected_lang_name = get_language_name(detected_language)
         menu = get_language_menu()
         
@@ -224,7 +223,6 @@ def complete_summary_job(meeting_id, chosen_language):
             conn.commit()
         
         # Send summary to user
-        from language_handler_v2 import get_language_name
         lang_name = get_language_name(chosen_language)
         header = f"📝 *Meeting Summary ({lang_name}):*\n\n"
         send_whatsapp(phone, header + summary)
