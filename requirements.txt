@@ -9,4 +9,5 @@ gunicorn
 openai
 redis
 rq
+cryptography 
 ffmpeg-python
