@@ -311,6 +311,27 @@ def complete_summary_job(meeting_id, chosen_language):
             
             conn.commit()
             
+            # Encrypt data after job completion
+            try:
+                from encryption import encrypt_sensitive_data
+                encrypted_transcript = encrypt_sensitive_data(transcript)
+                encrypted_summary = encrypt_sensitive_data(summary)
+                
+                cur.execute("""
+                    UPDATE meeting_notes 
+                    SET transcript=%s, summary=%s
+                    WHERE id=%s
+                """, (encrypted_transcript, encrypted_summary, meeting_id))
+                conn.commit()
+                print(f"WORKER: Data encrypted for meeting {meeting_id}")
+                
+                # Send encryption confirmation to user
+                send_whatsapp(phone, "Data encrypted for recording")
+                
+            except Exception as encrypt_error:
+                print(f"WORKER: Encryption failed: {encrypt_error}")
+                # Continue without encryption - don't fail the job
+            
         print(f"WORKER: Summary sent and job completed")
         return {"success": True, "summary_sent": True}
         
