@@ -326,7 +326,7 @@ def complete_summary_job(meeting_id, chosen_language):
                 print(f"WORKER: Data encrypted for meeting {meeting_id}")
                 
                 # Send encryption confirmation to user
-                send_whatsapp(phone, "Data encrypted for recording")
+                send_whatsapp(phone, "✅Data Successfully Encrypted with AES-256🛡️")
                 
             except Exception as encrypt_error:
                 print(f"WORKER: Encryption failed: {encrypt_error}")
