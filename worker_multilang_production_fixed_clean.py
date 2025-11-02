@@ -95,6 +95,7 @@ def process_audio_job(meeting_id, media_url):
         # Check file size
         file_size_mb = len(resp.content) / (1024 * 1024)
         if file_size_mb > 24:
+            send_whatsapp(phone, f"⚠️ Audio file too large ({file_size_mb:.1f}MB). Maximum allowed: 24MB. Please send a shorter recording.")
             raise ValueError(f"Audio file too large: {file_size_mb:.2f}MB (max 25MB)")
         
         # Save to temp file with OpenAI-compatible format detection
@@ -129,6 +130,7 @@ def process_audio_job(meeting_id, media_url):
         print(f"WORKER: Saved audio file: {tmp_path}, size: {file_size} bytes")
         
         if file_size < 100:  # Less than 100 bytes is likely not valid audio
+            send_whatsapp(phone, "⚠️ Audio file appears to be corrupted or too small. Please try sending again.")
             raise ValueError(f"Audio file too small: {file_size} bytes")
         
         # Proactive transcoding for better compatibility (optional)
@@ -326,7 +328,7 @@ def complete_summary_job(meeting_id, chosen_language):
                 print(f"WORKER: Data encrypted for meeting {meeting_id}")
                 
                 # Send encryption confirmation to user
-                send_whatsapp(phone, "✅Data Successfully Encrypted with AES-256🔐")
+                send_whatsapp(phone, "🔒 Data encrypted for recording ✅")
                 
             except Exception as encrypt_error:
                 print(f"WORKER: Encryption failed: {encrypt_error}")
