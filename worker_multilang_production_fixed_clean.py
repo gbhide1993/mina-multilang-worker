@@ -235,14 +235,24 @@ def process_audio_job(meeting_id, media_url):
             
             conn.commit()
         
-        # Send language menu and END JOB
+        # Extract tasks automatically from transcript
+        try:
+            from voice_task_extractor import extract_tasks_from_transcript
+            tasks = extract_tasks_from_transcript(transcript, phone)
+            if tasks:
+                send_whatsapp(phone, f"✅ Extracted {len(tasks)} task(s) from your voice note!")
+                print(f"WORKER: Extracted {len(tasks)} tasks")
+        except Exception as task_error:
+            print(f"WORKER: Task extraction failed: {task_error}")
+        
+        # Send language menu for summary
         detected_name = get_language_name(detected_language)
         menu = get_language_menu()
         
-        message = f"Audio transcribed!\nDetected: {detected_name}\n\nChoose summary language:\n\n{menu}"
+        message = f"Audio transcribed!\nDetected: {detected_name}\n\nWant a summary? Choose language:\n\n{menu}\n\nOr type 'skip' to skip summary."
         send_whatsapp(phone, message)
         
-        print(f"WORKER: Language menu sent, job complete")
+        print(f"WORKER: Tasks extracted and language menu sent")
         return {"success": True, "transcript_ready": True}
         
     except Exception as e:
