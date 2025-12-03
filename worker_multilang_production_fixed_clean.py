@@ -347,6 +347,41 @@ def complete_summary_job(meeting_id, chosen_language):
             pass
         return {"error": str(e)}
 
+def extract_tasks_from_voice_job(meeting_id):
+    """Extract tasks from voice note transcript"""
+    print(f"EXTRACTING TASKS: meeting_id={meeting_id}")
+    
+    try:
+        from voice_task_extractor import extract_tasks_from_transcript
+        
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT phone, transcript FROM meeting_notes WHERE id=%s", (meeting_id,))
+            row = cur.fetchone()
+            
+            if not row:
+                return {"error": "Meeting not found"}
+            
+            phone = row[0] if hasattr(row, '__getitem__') else row.phone
+            transcript = row[1] if hasattr(row, '__getitem__') else row.transcript
+            
+            if not transcript:
+                return {"error": "No transcript found"}
+        
+        # Extract tasks using LLM
+        tasks = extract_tasks_from_transcript(transcript, phone)
+        
+        if tasks:
+            send_whatsapp(phone, f"✅ Extracted {len(tasks)} task(s) from your voice note!")
+        else:
+            send_whatsapp(phone, "No tasks found in this voice note.")
+        
+        return {"success": True, "tasks_count": len(tasks)}
+        
+    except Exception as e:
+        print(f"TASK EXTRACTION ERROR: {e}")
+        traceback.print_exc()
+        return {"error": str(e)}
+
 def test_worker_job():
     print("PRODUCTION MULTILANG WORKER TEST SUCCESS!")
     return "test_success"
