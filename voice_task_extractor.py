@@ -12,44 +12,83 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 def extract_tasks_from_transcript(transcript, phone):
     """Extract tasks from transcript using LLM"""
     
-    prompt = f"""Extract actionable tasks from this voice note transcript.
-Return ONLY a JSON array of tasks. Each task should have:
-- title: Brief task description
-- deadline: ISO date if mentioned, else null
-- project: Project/client name if mentioned, else null
+    prompt = f"""You are an AI assistant that extracts actionable tasks from voice notes.
+
+Analyze this transcript and identify ALL tasks, to-dos, reminders, and action items.
+Look for:
+- Direct tasks: "I need to...", "I have to...", "I should...", "remind me to..."
+- Commitments: "I'll...", "I will...", "I'm going to..."
+- Deadlines: "by tomorrow", "next week", "on Monday", specific dates/times
+- Meetings: "meeting with...", "call with...", "discuss with..."
+- Follow-ups: "follow up on...", "check on...", "get back to..."
+- Purchases/errands: "buy...", "get...", "pick up..."
+- Work items: "finish...", "complete...", "submit...", "send..."
 
 Transcript:
 {transcript}
 
-Return format: [{{"title": "...", "deadline": "2024-01-15", "project": "..."}}]
-If no tasks found, return: []"""
+Return ONLY valid JSON array. Each task must have:
+- title: Clear, actionable task description (required)
+- deadline: ISO date YYYY-MM-DD if mentioned, else null
+- project: Project/client/category name if mentioned, else null
+
+Examples:
+- "I need to call John tomorrow" → {{"title": "Call John", "deadline": "2024-01-15", "project": null}}
+- "Buy groceries" → {{"title": "Buy groceries", "deadline": null, "project": null}}
+- "Finish the report for ABC client by Friday" → {{"title": "Finish report", "deadline": "2024-01-19", "project": "ABC"}}
+
+Return format: [{{"title": "...", "deadline": "...", "project": "..."}}]
+If NO tasks found, return: []"""
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
+            messages=[
+                {"role": "system", "content": "You are a task extraction expert. Extract ALL actionable items from voice notes. Be generous - if something sounds like a task, include it. Return only valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2
         )
         
-        tasks_json = _parse_json_response(response.choices[0].message.content)
+        content = response.choices[0].message.content
+        print(f"TASK EXTRACTOR: LLM response: {content[:200]}...")
+        
+        tasks_json = _parse_json_response(content)
+        print(f"TASK EXTRACTOR: Parsed {len(tasks_json)} tasks from JSON")
+        
+        if not tasks_json:
+            print(f"TASK EXTRACTOR: No tasks found in transcript")
+            return []
         
         # Create tasks in database
         created_tasks = []
-        for task_data in tasks_json:
-            task_id = create_task(
-                phone=phone,
-                title=task_data.get('title', ''),
-                deadline=task_data.get('deadline'),
-                project=task_data.get('project'),
-                source='voice_note'
+        for i, task_data in enumerate(tasks_json):
+            title = task_data.get('title', '').strip()
+            if not title:
+                print(f"TASK EXTRACTOR: Skipping task {i+1} - no title")
+                continue
+            
+            print(f"TASK EXTRACTOR: Creating task {i+1}: {title}")
+            task = create_task(
+                phone_or_user_id=phone,
+                title=title,
+                due_at=task_data.get('deadline'),
+                source='voice_note',
+                metadata={'project': task_data.get('project'), 'transcript_snippet': transcript[:100]} if task_data.get('project') else {'transcript_snippet': transcript[:100]}
             )
-            if task_id:
+            if task:
                 created_tasks.append(task_data)
+                print(f"TASK EXTRACTOR: Task created successfully")
+            else:
+                print(f"TASK EXTRACTOR: Failed to create task in database")
         
+        print(f"TASK EXTRACTOR: Successfully created {len(created_tasks)} tasks")
         return created_tasks
         
     except Exception as e:
-        print(f"Task extraction error: {e}")
+        print(f"TASK EXTRACTOR ERROR: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 def _parse_json_response(content):
