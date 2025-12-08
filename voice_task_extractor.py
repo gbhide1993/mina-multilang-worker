@@ -12,13 +12,27 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 def extract_tasks_from_transcript(transcript, phone):
     """Extract tasks from transcript using LLM"""
     
+    from datetime import datetime, timedelta
+    import pytz
+    
+    # Get current date in IST
+    ist = pytz.timezone('Asia/Kolkata')
+    today = datetime.now(ist)
+    today_str = today.strftime('%Y-%m-%d')
+    tomorrow_str = (today + timedelta(days=1)).strftime('%Y-%m-%d')
+    day_name = today.strftime('%A')
+    
     prompt = f"""You are an AI assistant that extracts actionable tasks from voice notes.
+
+TODAY'S DATE: {today_str} ({day_name})
+TOMORROW: {tomorrow_str}
 
 Analyze this transcript and identify ALL tasks, to-dos, reminders, and action items.
 Look for:
 - Direct tasks: "I need to...", "I have to...", "I should...", "remind me to..."
 - Commitments: "I'll...", "I will...", "I'm going to..."
 - Deadlines: "by tomorrow", "next week", "on Monday", specific dates/times
+- Hindi/Marathi words: "उद्या" (tomorrow), "आज" (today), "परवा" (day after tomorrow)
 - Meetings: "meeting with...", "call with...", "discuss with..."
 - Follow-ups: "follow up on...", "check on...", "get back to..."
 - Purchases/errands: "buy...", "get...", "pick up..."
@@ -29,13 +43,13 @@ Transcript:
 
 Return ONLY valid JSON array. Each task must have:
 - title: Clear, actionable task description (required)
-- deadline: ISO date YYYY-MM-DD if mentioned, else null
+- deadline: ISO date YYYY-MM-DD if mentioned (calculate from TODAY'S DATE above), else null
 - project: Project/client/category name if mentioned, else null
 
 Examples:
-- "I need to call John tomorrow" → {{"title": "Call John", "deadline": "2024-01-15", "project": null}}
+- "I need to call John tomorrow" → {{"title": "Call John", "deadline": "{tomorrow_str}", "project": null}}
 - "Buy groceries" → {{"title": "Buy groceries", "deadline": null, "project": null}}
-- "Finish the report for ABC client by Friday" → {{"title": "Finish report", "deadline": "2024-01-19", "project": "ABC"}}
+- "Finish the report for ABC client by Friday" → {{"title": "Finish report", "deadline": "YYYY-MM-DD", "project": "ABC"}}
 
 Return format: [{{"title": "...", "deadline": "...", "project": "..."}}]
 If NO tasks found, return: []"""
@@ -68,11 +82,12 @@ If NO tasks found, return: []"""
                 print(f"TASK EXTRACTOR: Skipping task {i+1} - no title")
                 continue
             
-            print(f"TASK EXTRACTOR: Creating task {i+1}: {title}")
+            deadline = task_data.get('deadline')
+            print(f"TASK EXTRACTOR: Creating task {i+1}: {title} (deadline: {deadline})")
             task = create_task(
                 phone_or_user_id=phone,
                 title=title,
-                due_at=task_data.get('deadline'),
+                due_at=deadline,
                 source='voice_note',
                 metadata={'project': task_data.get('project'), 'transcript_snippet': transcript[:100]} if task_data.get('project') else {'transcript_snippet': transcript[:100]}
             )
