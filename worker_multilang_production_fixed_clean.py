@@ -238,12 +238,23 @@ def process_audio_job(meeting_id, media_url):
         # Extract tasks automatically from transcript
         try:
             from voice_task_extractor import extract_tasks_from_transcript
+            print(f"WORKER: Starting automatic task extraction for transcript length: {len(transcript)}")
+            print(f"WORKER: Transcript preview: {transcript[:200]}...")
+            
             tasks = extract_tasks_from_transcript(transcript, phone)
-            if tasks:
-                send_whatsapp(phone, f"✅ Extracted {len(tasks)} task(s) from your voice note!")
-                print(f"WORKER: Extracted {len(tasks)} tasks")
+            
+            if tasks and len(tasks) > 0:
+                task_list = "\n".join([f"{i+1}. {t.get('title', 'Untitled')}" for i, t in enumerate(tasks[:5])])
+                if len(tasks) > 5:
+                    task_list += f"\n...and {len(tasks)-5} more"
+                send_whatsapp(phone, f"✅ Extracted {len(tasks)} task(s):\n\n{task_list}")
+                print(f"WORKER: Successfully extracted and created {len(tasks)} tasks")
+            else:
+                print(f"WORKER: No tasks found in transcript (LLM returned empty array)")
         except Exception as task_error:
-            print(f"WORKER: Task extraction failed: {task_error}")
+            print(f"WORKER: Task extraction FAILED with error: {task_error}")
+            traceback.print_exc()
+            send_whatsapp(phone, "⚠️ Task extraction encountered an error. Your transcript is saved.")
         
         # Send language menu for summary
         detected_name = get_language_name(detected_language)
@@ -252,7 +263,7 @@ def process_audio_job(meeting_id, media_url):
         message = f"Audio transcribed!\nDetected: {detected_name}\n\nWant a summary? Choose language:\n\n{menu}\n\nOr type 'skip' to skip summary."
         send_whatsapp(phone, message)
         
-        print(f"WORKER: Tasks extracted and language menu sent")
+        print(f"WORKER: Task extraction complete (success={len(tasks) if 'tasks' in locals() else 0}), language menu sent")
         return {"success": True, "transcript_ready": True}
         
     except Exception as e:
