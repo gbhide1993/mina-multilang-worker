@@ -256,6 +256,25 @@ def process_audio_job(meeting_id, media_url):
             traceback.print_exc()
             send_whatsapp(phone, "⚠️ Task extraction encountered an error. Your transcript is saved.")
         
+        # Extract custom reminders from transcript
+        try:
+            from custom_reminders import extract_custom_reminders
+            print(f"WORKER: Starting custom reminder extraction")
+            
+            reminders = extract_custom_reminders(transcript, phone, meeting_id)
+            
+            if reminders and len(reminders) > 0:
+                reminder_list = "\n".join([f"⏰ {r['task']} at {r['remind_at'][:16]}" for r in reminders[:3]])
+                if len(reminders) > 3:
+                    reminder_list += f"\n...and {len(reminders)-3} more"
+                send_whatsapp(phone, f"⏰ Set {len(reminders)} custom reminder(s):\n\n{reminder_list}")
+                print(f"WORKER: Successfully created {len(reminders)} custom reminders")
+            else:
+                print(f"WORKER: No custom reminders found in transcript")
+        except Exception as reminder_error:
+            print(f"WORKER: Custom reminder extraction FAILED with error: {reminder_error}")
+            traceback.print_exc()
+        
         # Send language menu for summary
         detected_name = get_language_name(detected_language)
         menu = get_language_menu()
