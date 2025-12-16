@@ -14,5 +14,8 @@ ffmpeg-python
 apscheduler
 pytz
 python-dateutil
+Pillow
+pytesseract
+
 
 
