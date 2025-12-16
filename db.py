@@ -1,26 +1,39 @@
 # db.py (PostgreSQL version)
-import psycopg2
 from utils import normalize_phone_for_db
-from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 import os
 import json
 
-
-
-
-# Use DATABASE_URL from environment
+# Use DATABASE_URL from environment or default to local SQLite
 DB_URL = os.getenv("DATABASE_URL")
 if not DB_URL:
-    raise RuntimeError("DATABASE_URL must be set in environment (Production).")
+    # Default to local SQLite for development
+    DB_URL = "sqlite:///local_mina.db"
+    print("No DATABASE_URL found, using local SQLite database: local_mina.db")
+
+# Determine database type and import appropriate driver
+IS_POSTGRES = DB_URL.startswith('postgresql:') or DB_URL.startswith('postgres:')
+
+if IS_POSTGRES:
+    try:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        PSYCOPG_VERSION = 2
+    except ImportError:
+        import psycopg
+        from psycopg.rows import dict_row
+        PSYCOPG_VERSION = 3
 
 @contextmanager
 def get_conn():
     """
-    Yields a psycopg2 connection.
+    Yields a PostgreSQL connection.
     """
-    conn = psycopg2.connect(DB_URL)
+    if PSYCOPG_VERSION == 2:
+        conn = psycopg2.connect(DB_URL)
+    else:
+        conn = psycopg.connect(DB_URL)
     try:
         yield conn
     finally:
@@ -32,11 +45,15 @@ def get_conn():
 @contextmanager
 def get_cursor():
     """
-    Yields a cursor configured to return mapping-like rows (RealDictCursor).
+    Yields a cursor configured to return mapping-like rows.
     Commits on success, rollbacks on exception.
     """
     with get_conn() as conn:
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        if PSYCOPG_VERSION == 2:
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+        else:
+            conn.row_factory = dict_row
+            cur = conn.cursor()
         try:
             yield cur
             conn.commit()
@@ -154,6 +171,173 @@ def init_db():
             END
             WHERE job_state IS NULL
         """)
+        
+        # Tasks table for voice-based task creation
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            title TEXT NOT NULL,
+            description TEXT,
+            due_at TIMESTAMP,
+            priority INTEGER DEFAULT 3,
+            status VARCHAR(20) DEFAULT 'open',
+            source VARCHAR(50) DEFAULT 'whatsapp',
+            metadata JSONB,
+            recurring_rule TEXT,
+            deleted BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+        
+        # Reminders table for scheduled task reminders
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS reminders (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            remind_at TIMESTAMP NOT NULL,
+            sent BOOLEAN DEFAULT FALSE,
+            sent_at TIMESTAMP,
+            attempts INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+        
+        # Task shares for team collaboration
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS task_shares (
+            id SERIAL PRIMARY KEY,
+            task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            team_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            permission VARCHAR(20) DEFAULT 'view',
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+        
+        # Task tags
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS task_tags (
+            id SERIAL PRIMARY KEY,
+            task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            tag VARCHAR(100) NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+        
+        # Create indexes for performance
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_status ON tasks(user_id, status, deleted);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tasks_due_at ON tasks(due_at) WHERE status='open' AND deleted=false;")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_reminders_sent ON reminders(sent, remind_at);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_task_shares_task_id ON task_shares(task_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_task_tags_task_id ON task_tags(task_id);")
+        
+        # Meeting bots table for live meeting transcription
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS meeting_bots (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            meeting_url TEXT NOT NULL,
+            bot_id TEXT,
+            platform VARCHAR(20),
+            status VARCHAR(20) DEFAULT 'pending',
+            transcript TEXT,
+            live_transcript TEXT,
+            summary TEXT,
+            participants JSONB,
+            recording_url TEXT,
+            started_at TIMESTAMP,
+            ended_at TIMESTAMP,
+            last_update_sent_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+        
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_meeting_bots_user_status ON meeting_bots(user_id, status);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_meeting_bots_bot_id ON meeting_bots(bot_id);")
+        
+        # NEW FEATURES TABLES
+        
+        # Location check-ins table
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS location_checkins (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            latitude DECIMAL(10, 8),
+            longitude DECIMAL(11, 8),
+            address TEXT,
+            checkin_time TIMESTAMP DEFAULT NOW(),
+            checkout_time TIMESTAMP,
+            notes TEXT,
+            photos JSONB,
+            task_id INTEGER REFERENCES tasks(id),
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+        
+        # Contacts table
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS contacts (
+            id SERIAL PRIMARY KEY,
+            user_phone TEXT NOT NULL,
+            contact_name TEXT NOT NULL,
+            contact_number TEXT NOT NULL,
+            contact_email TEXT,
+            company TEXT,
+            notes TEXT,
+            source VARCHAR(50) DEFAULT 'manual',
+            created_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(user_phone, contact_number)
+        );
+        """)
+        
+        # Image OCR activities table
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS image_activities (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            image_url TEXT,
+            extracted_text TEXT,
+            activity_type VARCHAR(50),
+            result_data JSONB,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+        
+        # User activities log table
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_activities (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            activity_type VARCHAR(50) NOT NULL,
+            activity_data JSONB,
+            source VARCHAR(50) DEFAULT 'whatsapp',
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+        
+        # Custom reminders table
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS custom_reminders (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            reminder_text TEXT NOT NULL,
+            remind_at TIMESTAMP NOT NULL,
+            sent BOOLEAN DEFAULT FALSE,
+            sent_at TIMESTAMP,
+            source_meeting_id INTEGER REFERENCES meeting_notes(id),
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+        
+        # Create indexes for new tables
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_location_checkins_user_time ON location_checkins(user_id, checkin_time);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_contacts_user_phone ON contacts(user_phone);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_image_activities_user_type ON image_activities(user_id, activity_type);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_activities_user_type ON user_activities(user_id, activity_type, created_at);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_custom_reminders_remind_at ON custom_reminders(remind_at, sent);")
+        
         conn.commit()
 
 
@@ -351,7 +535,6 @@ def upsert_payment_and_activate(raw_phone, razorpay_payment_id, amount, status):
 def get_user_by_phone(raw_phone):
     phone = normalize_phone_for_db(raw_phone)
     with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-
         cur.execute("SELECT * FROM users WHERE phone = %s", (phone,))
         row = cur.fetchone()
         return dict(row) if row else None
@@ -533,3 +716,74 @@ def get_user_language(phone):
     """Get user's preferred language, default to Hindi"""
     user = get_user(phone)
     return user.get('preferred_language', 'hi') if user else 'hi'
+
+# NEW FEATURES DATABASE FUNCTIONS
+
+def log_location_checkin(phone, latitude, longitude, address=None, task_id=None):
+    """Log location check-in to database"""
+    user = get_or_create_user(phone)
+    with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            INSERT INTO location_checkins (user_id, latitude, longitude, address, task_id, checkin_time)
+            VALUES (%s, %s, %s, %s, %s, now())
+            RETURNING *
+        """, (user['id'], latitude, longitude, address, task_id))
+        row = cur.fetchone()
+        conn.commit()
+        return dict(row) if row else None
+
+def log_contact_save(phone, contact_name, contact_number, contact_email=None, company=None, source='whatsapp'):
+    """Save contact to database"""
+    with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            INSERT INTO contacts (user_phone, contact_name, contact_number, contact_email, company, source)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_phone, contact_number) 
+            DO UPDATE SET 
+                contact_name = EXCLUDED.contact_name,
+                contact_email = EXCLUDED.contact_email,
+                company = EXCLUDED.company
+            RETURNING *
+        """, (phone, contact_name, contact_number, contact_email, company, source))
+        row = cur.fetchone()
+        conn.commit()
+        return dict(row) if row else None
+
+def log_image_activity(phone, image_url, extracted_text, activity_type, result_data=None):
+    """Log image OCR activity to database"""
+    user = get_or_create_user(phone)
+    with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            INSERT INTO image_activities (user_id, image_url, extracted_text, activity_type, result_data)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING *
+        """, (user['id'], image_url, extracted_text, activity_type, json.dumps(result_data) if result_data else None))
+        row = cur.fetchone()
+        conn.commit()
+        return dict(row) if row else None
+
+def log_user_activity(phone, activity_type, activity_data=None, source='whatsapp'):
+    """Log general user activity to database"""
+    user = get_or_create_user(phone)
+    with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            INSERT INTO user_activities (user_id, activity_type, activity_data, source)
+            VALUES (%s, %s, %s, %s)
+            RETURNING *
+        """, (user['id'], activity_type, json.dumps(activity_data) if activity_data else None, source))
+        row = cur.fetchone()
+        conn.commit()
+        return dict(row) if row else None
+
+def save_custom_reminder(phone, reminder_text, remind_at, source_meeting_id=None):
+    """Save custom reminder to database"""
+    user = get_or_create_user(phone)
+    with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            INSERT INTO custom_reminders (user_id, reminder_text, remind_at, source_meeting_id)
+            VALUES (%s, %s, %s, %s)
+            RETURNING *
+        """, (user['id'], reminder_text, remind_at, source_meeting_id))
+        row = cur.fetchone()
+        conn.commit()
+        return dict(row) if row else None
