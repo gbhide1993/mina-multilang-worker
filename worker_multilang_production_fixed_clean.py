@@ -4,10 +4,6 @@ Merged, robust worker for MinA (production-ready, defensive).
 Combines: media download (with Twilio auth), transcription (with conversion fallback),
 language detection, persona-aware routing -> billing/task/clarify,
 task extraction, DB persistence and safe stubs for missing modules.
-
-References:
-- original file A (longer production file). :contentReference[oaicite:2]{index=2}
-- original file B (routing-first trimmed file). :contentReference[oaicite:3]{index=3}
 """
 
 import os
@@ -42,7 +38,6 @@ def set_pending_state(meeting_id, state):
         )
         conn.commit()
 
-
 def get_pending_state_by_meeting(meeting_id):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -64,11 +59,11 @@ except Exception:
 
 # DB connection helper
 try:
-    # prefer db.get_conn if present (from file A)
+    # prefer db.get_conn if present
     from db import get_conn
 except Exception:
     try:
-        # or db_utils.get_conn (from file B)
+        # or db_utils.get_conn
         from db_utils import get_conn
     except Exception:
         # fallback simple stub (non-persistent)
@@ -88,22 +83,25 @@ except Exception:
 
 # WhatsApp sender helper
 try:
-    from utils import send_whatsapp  # preferred in file A
+    from utils import send_whatsapp  # preferred
 except Exception:
     try:
-        from whatsapp_utils import send_whatsapp  # fallback in file B
+        from whatsapp_utils import send_whatsapp  # fallback
     except Exception:
         def send_whatsapp(phone, message):
             print(f"[STUB send_whatsapp] to={phone} msg={message}")
 
 # Transcription helpers
-# Prefer OpenAI-based from file A, else fallback to a simple local STT stub
+# Prefer OpenAI-based, else fallback to a simple local STT stub
 try:
     from openai_client_multilang import transcribe_file_multilang, summarize_text_multilang
     def transcribe_audio(path):
         # wrapper to unify return signature (transcript, language)
-        transcript = transcribe_file_multilang(path, language=None)
-        return transcript, None
+        # Fix: handle if function returns tuple or string
+        result = transcribe_file_multilang(path, language=None)
+        if isinstance(result, tuple):
+            return result[0], result[1]
+        return result, None
 except Exception:
     # fallback to a local STT utils module if available
     try:
@@ -138,17 +136,16 @@ except Exception:
 def extract_tasks_safe(transcript: str, phone: str):
     try:
         from voice_task_extractor import extract_tasks_from_transcript
-    except Exception as e:
-        print(f"[WARN] voice_task_extractor not available: {e}")
-        return None
-    try:
         return extract_tasks_from_transcript(transcript, phone)
+    except ImportError:
+        print("[WARN] voice_task_extractor module missing.")
+        return None
     except Exception as e:
         print(f"[ERROR] extract_tasks_from_transcript failed: {e}")
         traceback.print_exc()
         return None
 
-# Language detection (merged from file A)
+# Language detection
 def _detect_language_from_transcript(transcript):
     if not transcript or len(transcript.strip()) < 10:
         return 'en'
@@ -182,7 +179,7 @@ def _detect_language_from_transcript(transcript):
         return 'en'
     return 'hi'
 
-# Graceful shutdown handler (kept for completeness)
+# Graceful shutdown handler
 class GracefulKiller:
     def __init__(self):
         self.kill_now = False
@@ -208,14 +205,15 @@ def process_audio_job(meeting_id, media_url):
     - handle each route (billing stub / task extraction / clarification)
     """
     print("🚨 WORKER: ENTERED process_audio_job — NEW CODE ACTIVE")
-    # ensure route variable exists in all paths
     route = "task"
-
     phone = None
     transcript = ""
     detected_language = None
     tmp_path = None
     resp = None
+    
+    # FIX: Initialize audio_url before try block to ensure scope safety
+    audio_url = media_url
 
     try:
         print(f"PRODUCTION WORKER: Processing meeting_id={meeting_id} media_url={media_url}")
@@ -227,12 +225,14 @@ def process_audio_job(meeting_id, media_url):
                 row = cur.fetchone()
                 if row:
                     phone = row[0] if isinstance(row, (list, tuple)) else getattr(row, 'phone', None) or row[0]
-                    audio_url = media_url or (row[1] if isinstance(row, (list, tuple)) else getattr(row, 'audio_file', None))
+                    # Update audio_url from DB if media_url was missing
+                    fetched_url = row[1] if isinstance(row, (list, tuple)) else getattr(row, 'audio_file', None)
+                    audio_url = media_url or fetched_url
                 else:
                     audio_url = media_url
         except Exception as db_meta_err:
             print(f"[WARN] Could not load meeting metadata: {db_meta_err}")
-            audio_url = media_url
+            # audio_url already defaults to media_url
 
         # === Download media (support Twilio auth)
         tmp_path = None
@@ -244,10 +244,12 @@ def process_audio_job(meeting_id, media_url):
                 if "twilio.com" in audio_url and twilio_sid and twilio_token:
                     auth = HTTPBasicAuth(twilio_sid, twilio_token)
                     print("[WORKER] Using Twilio HTTP Basic Auth for media download")
+                
                 resp = requests.get(audio_url, auth=auth, timeout=60)
                 if resp.status_code == 401:
                     raise ValueError(f"Twilio auth failed (401). Check credentials.")
                 resp.raise_for_status()
+                
                 # Determine likely suffix from content-type
                 ctype = resp.headers.get('Content-Type', '').lower()
                 if any(x in ctype for x in ['m4a', 'mp4', 'aac']): suffix = '.m4a'
@@ -256,6 +258,7 @@ def process_audio_job(meeting_id, media_url):
                 elif 'webm' in ctype: suffix = '.webm'
                 elif 'flac' in ctype: suffix = '.flac'
                 else: suffix = '.mp3'
+                
                 # Save to temp file
                 with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
                     tf.write(resp.content)
@@ -286,7 +289,6 @@ def process_audio_job(meeting_id, media_url):
                 raise ValueError("Audio file too small or corrupt.")
         except Exception as e:
             print(f"[WARN] file sanity check failed: {e}")
-            # cleanup and exit
             if tmp_path and os.path.exists(tmp_path):
                 try: os.remove(tmp_path)
                 except: pass
@@ -440,21 +442,17 @@ def process_audio_job(meeting_id, media_url):
                     pass
                 return {"route": "task", "error": str(task_e)}
 
-            if route == "clarify":
-               # Lock conversation to clarify mode
-               set_pending_state(meeting_id, "CLARIFY_INTENT")
-
-               send_whatsapp(
-                   phone or "unknown",
-                   "Aap invoice banana chahte ho ya sirf reminder?\n\n"
-                   "1️⃣ Invoice\n"
-                   "2️⃣ Reminder"
-               )
-
-               print("🔐 pending_state set to CLARIFY_INTENT")
-               return
-
-
+        if route == "clarify":
+            # Lock conversation to clarify mode
+            set_pending_state(meeting_id, "CLARIFY_INTENT")
+            send_whatsapp(
+                phone or "unknown",
+                "Aap invoice banana chahte ho ya sirf reminder?\n\n"
+                "1️⃣ Invoice\n"
+                "2️⃣ Reminder"
+            )
+            print("🔐 pending_state set to CLARIFY_INTENT")
+            return
 
         # unreachable, but safe fallback
         print(f"[WARN] reached unexpected fallback with route={route}")
@@ -500,18 +498,20 @@ def complete_summary_job(meeting_id, chosen_language):
             transcript = row[1] if isinstance(row, (list, tuple)) else getattr(row, 'transcript', None) or row[1]
             if not transcript:
                 return {"error": "No transcript found"}
-            # Summarize (use summarize_text_multilang if available)
+            
+            # Summarize
             try:
                 if 'summarize_text_multilang' in globals():
                     summary = summarize_text_multilang(transcript, chosen_language)
                 else:
-                    # heuristic fallback: return first 400 chars
+                    # heuristic fallback
                     summary = transcript[:400] + ("..." if len(transcript) > 400 else "")
                 if not summary or len(summary.strip()) < 10:
                     raise ValueError("Summary generation empty")
             except Exception as sum_e:
                 print(f"[WARN] summary generation failed: {sum_e}")
                 raise
+            
             # Send and persist
             try:
                 lang_name = chosen_language
@@ -519,6 +519,7 @@ def complete_summary_job(meeting_id, chosen_language):
                 send_whatsapp(phone, formatted_summary)
             except Exception:
                 print("[WARN] failed to send summary message")
+            
             cur.execute("""
                 UPDATE meeting_notes
                 SET summary=%s, chosen_language=%s, job_state=%s, summary_generated_at=now()
@@ -536,7 +537,7 @@ def complete_summary_job(meeting_id, chosen_language):
         return {"error": str(e)}
 
 # ---------------------------
-# Utility job: extract tasks directly (kept for backward compatibility)
+# Utility job: extract tasks directly (backward compatibility)
 # ---------------------------
 def extract_tasks_from_voice_job(meeting_id):
     print(f"EXTRACTING TASKS: meeting_id={meeting_id}")
@@ -553,6 +554,7 @@ def extract_tasks_from_voice_job(meeting_id):
                 return {"error": "Meeting not found"}
             phone = row[0] if isinstance(row, (list, tuple)) else getattr(row, 'phone', None) or row[0]
             transcript = row[1] if isinstance(row, (list, tuple)) else getattr(row, 'transcript', None) or row[1]
+        
         tasks = extract_tasks_from_transcript(transcript, phone)
         if tasks:
             try:
