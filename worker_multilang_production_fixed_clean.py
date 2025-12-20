@@ -23,6 +23,36 @@ import subprocess
 import requests
 from requests.auth import HTTPBasicAuth
 
+# ---- Conversation State Management ----
+
+ALLOWED_PENDING_STATES = {
+    None,
+    "CLARIFY_INTENT",
+    "CHOOSE_LANGUAGE"
+}
+
+def set_pending_state(meeting_id, state):
+    if state not in ALLOWED_PENDING_STATES:
+        raise ValueError(f"Invalid pending_state: {state}")
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE meeting_notes SET pending_state=%s WHERE id=%s",
+            (state, meeting_id)
+        )
+        conn.commit()
+
+
+def get_pending_state_by_meeting(meeting_id):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT pending_state FROM meeting_notes WHERE id=%s",
+            (meeting_id,)
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
 # Optional: dotenv load for local dev
 try:
     from dotenv import load_dotenv
@@ -410,13 +440,21 @@ def process_audio_job(meeting_id, media_url):
                     pass
                 return {"route": "task", "error": str(task_e)}
 
-        if route == "clarify":
-            try:
-                send_whatsapp(phone or "unknown",
-                              "Aap invoice banana chahte ho ya sirf reminder?\n\n1️⃣ Invoice\n2️⃣ Reminder")
-            except Exception:
-                print("[WARN] failed to send clarify message")
-            return {"route": "clarify", "handled": True}
+            if route == "clarify":
+        # 1️⃣ Lock conversation to clarify mode
+        set_pending_state(meeting_id, "CLARIFY_INTENT")
+    
+        # 2️⃣ Ask the question
+        send_whatsapp(
+            phone or "unknown",
+            "Aap invoice banana chahte ho ya sirf reminder?\n\n"
+            "1️⃣ Invoice\n"
+            "2️⃣ Reminder"
+        )
+    
+        print("🔐 pending_state set to CLARIFY_INTENT")
+        return
+
 
         # unreachable, but safe fallback
         print(f"[WARN] reached unexpected fallback with route={route}")
@@ -445,6 +483,12 @@ def process_audio_job(meeting_id, media_url):
 # Helper job: complete_summary_job (adapted from file A)
 # ---------------------------
 def complete_summary_job(meeting_id, chosen_language):
+    pending_state = get_pending_state_by_meeting(meeting_id)
+
+    if pending_state == "CLARIFY_INTENT":
+        print("⛔ Summary blocked — waiting for intent clarification")
+        return
+
     print(f"COMPLETING SUMMARY: meeting_id={meeting_id}, language={chosen_language}")
     try:
         with get_conn() as conn, conn.cursor() as cur:
