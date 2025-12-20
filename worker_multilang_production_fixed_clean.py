@@ -70,6 +70,7 @@ def _detect_language_from_transcript(transcript):
 
 def process_audio_job(meeting_id, media_url):
     print("🚨 WORKER: ENTERED process_audio_job — NEW CODE ACTIVE")
+    route = "task"  # SAFE DEFAULT
 
     """Process audio and send language menu (no waiting)"""
     print(f"PRODUCTION WORKER: Processing meeting_id={meeting_id}")
@@ -208,6 +209,28 @@ def process_audio_job(meeting_id, media_url):
         detected_language = _detect_language_from_transcript(transcript)
         print(f"PRODUCTION WORKER: Detected language: {detected_language}")
         
+        # ===============================
+        # ROUTER DECISION (NEW)
+        # ===============================
+        print("🧭 ROUTER: deciding route")
+        
+        try:
+            # TEMP intent guess (until real intent classifier)
+            if "invoice" in transcript.lower():
+                intent_guess = "create_invoice"
+            else:
+                intent_guess = "create_task"
+        
+            persona = None  # persona wiring later
+        
+            route = route_intent(intent_guess, persona)
+        
+            print(f"🧭 ROUTER: intent={intent_guess} persona={persona} route={route}")
+        
+        except Exception as e:
+            print(f"❌ ROUTER ERROR: {e}")
+            route = "task"
+
         # Calculate duration for credits
         try:
             from mutagen import File as MutagenFile
@@ -248,27 +271,10 @@ def process_audio_job(meeting_id, media_url):
                     "🧾 Invoice samjha. Billing flow agle step mein aayega.\n"
                     "Abhi sirf routing test ho raha hai."
                 )
+                return
             
             elif route == "task":
-                try:
-                    from voice_task_extractor import extract_tasks_from_transcript
-                    print(f"WORKER: Starting automatic task extraction for transcript length: {len(transcript)}")
-                    print(f"WORKER: Transcript preview: {transcript[:200]}...")
-                    
-                    tasks = extract_tasks_from_transcript(transcript, phone)
-                    
-                    if tasks and len(tasks) > 0:
-                        task_list = "\n".join([f"{i+1}. {t.get('title', 'Untitled')}" for i, t in enumerate(tasks[:5])])
-                        if len(tasks) > 5:
-                            task_list += f"\n...and {len(tasks)-5} more"
-                        send_whatsapp(phone, f"✅ Extracted {len(tasks)} task(s):\n\n{task_list}")
-                        print(f"WORKER: Successfully extracted and created {len(tasks)} tasks")
-                    else:
-                        print(f"WORKER: No tasks found in transcript (LLM returned empty array)")
-                except Exception as task_error:
-                    print(f"WORKER: Task extraction FAILED with error: {task_error}")
-                    traceback.print_exc()
-                    send_whatsapp(phone, "⚠️ Task extraction encountered an error. Your transcript is saved.")
+                
             
             elif route == "clarify":
                 send_whatsapp(
