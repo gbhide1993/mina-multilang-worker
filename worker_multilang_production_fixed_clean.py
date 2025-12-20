@@ -227,7 +227,7 @@ def process_audio_job(meeting_id, media_url):
             # Important: stop further processing for this message
             return
 
-        elif route == "task":
+        if route == "task":
             # Restore your original task extraction logic here
             print("📋 TASK ROUTE: extracting tasks from transcript")
             tasks = None
@@ -248,7 +248,7 @@ def process_audio_job(meeting_id, media_url):
             # After tasks handling, we may return or allow other flows; choose to return to avoid duplicate logic
             return
 
-        elif route == "clarify":
+        if route == "clarify":
             # Ask a clarification question
             send_whatsapp(phone or "unknown",
                           "Aap invoice banana chahte ho ya sirf reminder?\n\n1️⃣ Invoice\n2️⃣ Reminder")
