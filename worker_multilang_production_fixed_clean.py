@@ -443,16 +443,25 @@ def process_audio_job(meeting_id, media_url):
                 return {"route": "task", "error": str(task_e)}
 
         if route == "clarify":
-            # Lock conversation to clarify mode
-            set_pending_state(meeting_id, "CLARIFY_INTENT")
-            send_whatsapp(
-                phone or "unknown",
-                "Aap invoice banana chahte ho ya sirf reminder?\n\n"
-                "1️⃣ Invoice\n"
-                "2️⃣ Reminder"
-            )
-            print("🔐 pending_state set to CLARIFY_INTENT")
-            return
+            try:
+                set_pending_state(meeting_id, "CLARIFY_INTENT")
+                send_whatsapp(
+                    phone or "unknown",
+                    "Aap invoice banana chahte ho ya sirf reminder?\n\n"
+                    "1️⃣ Invoice\n"
+                    "2️⃣ Reminder"
+                )
+                print("🔐 pending_state set to CLARIFY_INTENT")
+                return {"route": "clarify", "handled": True}
+            except Exception as e:
+                print(f"[ERROR] clarify branch failed: {e}")
+                traceback.print_exc()
+                # fall back to safe behavior
+                try:
+                    send_whatsapp(phone or "unknown", "⚠️ Something went wrong. Please try again.")
+                except Exception:
+                    pass
+                return {"route": "clarify", "handled": False, "error": str(e)}
 
         # unreachable, but safe fallback
         print(f"[WARN] reached unexpected fallback with route={route}")
