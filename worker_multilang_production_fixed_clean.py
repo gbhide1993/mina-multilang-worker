@@ -236,6 +236,48 @@ def process_audio_job(meeting_id, media_url):
                 cur.execute("UPDATE users SET credits_remaining=%s WHERE phone=%s", (new_credits, phone))
             
             conn.commit()
+
+        # Extract tasks OR route to billing based on router
+            if route == "billing":
+                print("[BILLING] Billing intent detected — task extraction skipped")
+            
+                send_whatsapp(
+                    phone,
+                    "🧾 Invoice samjha. Billing flow agle step mein aayega.\n"
+                    "Abhi sirf routing test ho raha hai."
+                )
+            
+            elif route == "task":
+                try:
+                    from voice_task_extractor import extract_tasks_from_transcript
+                    print(f"WORKER: Starting automatic task extraction for transcript length: {len(transcript)}")
+                    print(f"WORKER: Transcript preview: {transcript[:200]}...")
+                    
+                    tasks = extract_tasks_from_transcript(transcript, phone)
+                    
+                    if tasks and len(tasks) > 0:
+                        task_list = "\n".join([f"{i+1}. {t.get('title', 'Untitled')}" for i, t in enumerate(tasks[:5])])
+                        if len(tasks) > 5:
+                            task_list += f"\n...and {len(tasks)-5} more"
+                        send_whatsapp(phone, f"✅ Extracted {len(tasks)} task(s):\n\n{task_list}")
+                        print(f"WORKER: Successfully extracted and created {len(tasks)} tasks")
+                    else:
+                        print(f"WORKER: No tasks found in transcript (LLM returned empty array)")
+                except Exception as task_error:
+                    print(f"WORKER: Task extraction FAILED with error: {task_error}")
+                    traceback.print_exc()
+                    send_whatsapp(phone, "⚠️ Task extraction encountered an error. Your transcript is saved.")
+            
+            elif route == "clarify":
+                send_whatsapp(
+                    phone,
+                    "Aap invoice banana chahte ho ya sirf reminder?\n\n"
+                    "1️⃣ Invoice\n"
+                    "2️⃣ Reminder"
+                )
+
+
+
         
         # Extract tasks automatically from transcript
         try:
