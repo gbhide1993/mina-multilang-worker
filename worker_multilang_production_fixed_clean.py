@@ -441,19 +441,19 @@ def process_audio_job(meeting_id, media_url):
                 return {"route": "task", "error": str(task_e)}
 
             if route == "clarify":
-                # 1️⃣ Lock conversation to clarify mode
-                set_pending_state(meeting_id, "CLARIFY_INTENT")
-            
-                # 2️⃣ Ask the question
-                send_whatsapp(
-                    phone or "unknown",
-                    "Aap invoice banana chahte ho ya sirf reminder?\n\n"
-                    "1️⃣ Invoice\n"
-                    "2️⃣ Reminder"
-                )
-            
-                print("🔐 pending_state set to CLARIFY_INTENT")
-                return
+               # Lock conversation to clarify mode
+               set_pending_state(meeting_id, "CLARIFY_INTENT")
+
+               send_whatsapp(
+                   phone or "unknown",
+                   "Aap invoice banana chahte ho ya sirf reminder?\n\n"
+                   "1️⃣ Invoice\n"
+                   "2️⃣ Reminder"
+               )
+
+               print("🔐 pending_state set to CLARIFY_INTENT")
+               return
+
 
 
         # unreachable, but safe fallback
