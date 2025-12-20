@@ -19,6 +19,8 @@ from db import get_conn
 from utils import send_whatsapp
 from openai_client_multilang import transcribe_file_multilang, summarize_text_multilang
 from language_handler_v2 import get_language_menu, get_language_name
+from router import route_intent
+
 
 class GracefulKiller:
     """Handle SIGTERM for graceful shutdown"""
