@@ -69,6 +69,8 @@ def _detect_language_from_transcript(transcript):
     return 'hi'  # Default to Hindi
 
 def process_audio_job(meeting_id, media_url):
+    print("🚨 WORKER: ENTERED process_audio_job — NEW CODE ACTIVE")
+
     """Process audio and send language menu (no waiting)"""
     print(f"PRODUCTION WORKER: Processing meeting_id={meeting_id}")
     tmp_path = None
