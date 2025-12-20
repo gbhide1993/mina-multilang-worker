@@ -287,26 +287,7 @@ def process_audio_job(meeting_id, media_url):
 
 
         
-        # Extract tasks automatically from transcript
-        try:
-            from voice_task_extractor import extract_tasks_from_transcript
-            print(f"WORKER: Starting automatic task extraction for transcript length: {len(transcript)}")
-            print(f"WORKER: Transcript preview: {transcript[:200]}...")
-            
-            tasks = extract_tasks_from_transcript(transcript, phone)
-            
-            if tasks and len(tasks) > 0:
-                task_list = "\n".join([f"{i+1}. {t.get('title', 'Untitled')}" for i, t in enumerate(tasks[:5])])
-                if len(tasks) > 5:
-                    task_list += f"\n...and {len(tasks)-5} more"
-                send_whatsapp(phone, f"✅ Extracted {len(tasks)} task(s):\n\n{task_list}")
-                print(f"WORKER: Successfully extracted and created {len(tasks)} tasks")
-            else:
-                print(f"WORKER: No tasks found in transcript (LLM returned empty array)")
-        except Exception as task_error:
-            print(f"WORKER: Task extraction FAILED with error: {task_error}")
-            traceback.print_exc()
-            send_whatsapp(phone, "⚠️ Task extraction encountered an error. Your transcript is saved.")
+    
         
         # Extract custom reminders from transcript
         try:
