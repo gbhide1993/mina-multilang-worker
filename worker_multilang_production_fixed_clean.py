@@ -17,6 +17,8 @@ import sys
 import traceback
 import time
 from typing import Optional
+from requests.auth import HTTPBasicAuth
+
 
 # Try to import existing helpers; if missing, provide safe stubs with logs
 try:
@@ -128,7 +130,13 @@ def process_audio_job(meeting_id, media_url):
             # simple download; adapt auth/headers as needed
             try:
                 import requests
-                r = requests.get(media_url, timeout=10)
+                r = requests.get(
+                    media_url, 
+                    auth = HTTPBasicAuth(
+                            os.environ.get("TWILIO_ACCOUNT_SID"),
+                            os.environ.get("TWILIO_AUTH_TOKEN")
+                        ),
+                    timeout=10)
                 if r.status_code == 200:
                     ext = ".ogg"
                     tmp_path = f"/tmp/mina_media_{int(time.time())}{ext}"
