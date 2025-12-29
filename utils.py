@@ -137,8 +137,10 @@ def send_whatsapp(to_phone: str, message: str, max_retries: int = 3) -> bool:
         return False
 
     if not account_sid or not auth_token:
-        print("⚠️ Missing Twilio credentials in environment.")
+        print(f"⚠️ Missing Twilio credentials. SID: {'✓' if account_sid else '✗'}, Token: {'✓' if auth_token else '✗'}")
         return False
+    
+    print(f"DEBUG: Using Twilio SID: {account_sid[:10]}...{account_sid[-4:]}")
 
     to_whatsapp_number = normalize_phone_for_db(to_phone)
     client = TwilioClient(account_sid, auth_token)
@@ -155,15 +157,173 @@ def send_whatsapp(to_phone: str, message: str, max_retries: int = 3) -> bool:
             
         except Exception as e:
             error_str = str(e)
-            if "503" in error_str or "Service is unavailable" in error_str:
+            print(f"❌ Twilio error (attempt {attempt + 1}/{max_retries}): {error_str}")
+            
+            if "401" in error_str or "Authenticate" in error_str:
+                print(f"❌ Authentication failed. Check Twilio credentials.")
+                return False
+            elif "503" in error_str or "Service is unavailable" in error_str:
                 if attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 2  # 2, 4, 6 seconds
-                    print(f"⚠️ Twilio service unavailable (attempt {attempt + 1}/{max_retries}). Retrying in {wait_time}s...")
+                    print(f"⚠️ Twilio service unavailable. Retrying in {wait_time}s...")
                     time.sleep(wait_time)
                     continue
             
-            print(f"❌ Failed to send WhatsApp message to {to_phone}: {e}")
-            return False
+            if attempt == max_retries - 1:
+                print(f"❌ Final attempt failed for {to_phone}: {e}")
+                return False
     
     print(f"❌ Failed to send WhatsApp message after {max_retries} attempts")
     return False
+
+
+def send_whatsapp_document(to_phone: str, content: str, filename: str = "meeting_minutes.txt", caption: str = "", max_retries: int = 3) -> bool:
+    """
+    Send a text document via WhatsApp using Twilio API.
+    
+    Args:
+        to_phone (str): Recipient's WhatsApp phone number
+        content (str): Text content to send as document
+        filename (str): Name of the file to send
+        caption (str): Optional caption for the document
+        max_retries (int): Maximum number of retry attempts
+    Returns:
+        bool: True on success, False on failure
+    """
+    import time
+    import tempfile
+    import requests
+    import base64
+    
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    from_whatsapp_number = os.getenv("TWILIO_WHATSAPP_FROM") or os.getenv("TWILIO_FROM") or "whatsapp:+14155238886"
+
+    if not to_phone:
+        print("⚠️ send_whatsapp_document called with no recipient phone number.")
+        return False
+
+    if not account_sid or not auth_token:
+        print("⚠️ Missing Twilio credentials in environment.")
+        return False
+
+    to_whatsapp_number = normalize_phone_for_db(to_phone)
+    client = TwilioClient(account_sid, auth_token)
+    
+    # Process document content for WhatsApp
+    temp_file_path = None
+    try:
+        # Create temp file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as temp_file:
+            temp_file.write(content)
+            temp_file_path = temp_file.name
+        
+        for attempt in range(max_retries):
+            try:
+                # For now, send as long message since Twilio media upload requires public URL
+                # Split content into chunks if too long
+                max_msg_length = 1500
+                if len(content) <= max_msg_length:
+                    msg = client.messages.create(
+                        from_=from_whatsapp_number,
+                        body=f"{caption}\n\n{content}",
+                        to=to_whatsapp_number
+                    )
+                else:
+                    # Send in chunks
+                    chunks = [content[i:i+max_msg_length] for i in range(0, len(content), max_msg_length)]
+                    for i, chunk in enumerate(chunks, 1):
+                        chunk_caption = f"{caption} (Part {i}/{len(chunks)})" if i == 1 else f"(Part {i}/{len(chunks)})"
+                        msg = client.messages.create(
+                            from_=from_whatsapp_number,
+                            body=f"{chunk_caption}\n\n{chunk}",
+                            to=to_whatsapp_number
+                        )
+                        if i < len(chunks):
+                            time.sleep(1)  # Brief delay between chunks
+                
+                print(f"✅ WhatsApp document content sent to {to_whatsapp_number}")
+                return True
+                
+            except Exception as e:
+                error_str = str(e)
+                if "503" in error_str or "Service is unavailable" in error_str:
+                    if attempt < max_retries - 1:
+                        wait_time = (attempt + 1) * 2
+                        print(f"⚠️ Twilio service unavailable (attempt {attempt + 1}/{max_retries}). Retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue
+                
+                print(f"❌ Failed to send WhatsApp document to {to_phone}: {e}")
+                return False
+        
+        print(f"❌ Failed to send WhatsApp document after {max_retries} attempts")
+        return False
+        
+    except Exception as e:
+        print(f"❌ Error processing document: {e}")
+        return False
+    finally:
+        # Cleanup temporary file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except Exception as e:
+                print(f"⚠️ Failed to cleanup temp file {temp_file_path}: {e}")
+
+
+def create_detailed_meeting_minutes(summary: str, transcript: str, language: str, meeting_date: str = None) -> str:
+    """
+    Create a comprehensive meeting minutes document with all details.
+    
+    Args:
+        summary (str): Meeting summary
+        transcript (str): Full transcript
+        language (str): Language name
+        meeting_date (str): Meeting date (optional)
+    Returns:
+        str: Formatted meeting minutes document
+    """
+    from datetime import datetime
+    
+    if not meeting_date:
+        meeting_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+    
+    # Create a more WhatsApp-friendly format
+    document = f"""📝 *MEETING MINUTES*
+
+📅 *Date:* {meeting_date}
+🌍 *Language:* {language}
+⚙️ *Generated by:* MinA Meeting Assistant
+
+{'=' * 40}
+📝 *SUMMARY*
+{'=' * 40}
+
+{summary}
+
+{'=' * 40}
+🎤 *FULL TRANSCRIPT*
+{'=' * 40}
+
+{transcript}
+
+{'=' * 40}
+✅ *END OF DOCUMENT*
+{'=' * 40}
+
+📝 This document was automatically generated from audio transcription.
+📞 For questions or corrections, please contact the meeting organizer.
+"""
+    
+    return document
+
+
+def transcribe_file_multilang(file_path: str) -> str:
+    """
+    Transcribe an audio file into text.
+    Placeholder for now – replace internals with your actual STT logic.
+    """
+    # TODO: plug in Whisper / Google STT / any engine you already use
+    # For now, raise explicit error if not implemented
+    raise NotImplementedError("transcribe_file_multilang is not implemented yet")
