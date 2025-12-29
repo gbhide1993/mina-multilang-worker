@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from contextlib import contextmanager
 import os
 import json
+import uuid 
 
 # Use DATABASE_URL from environment or default to local SQLite
 DB_URL = os.getenv("DATABASE_URL")
@@ -76,6 +77,72 @@ def fetchone_normalized(cur):
     # tuple fallback: convert to dict using cursor.description
     cols = [d.name for d in cur.description]  # psycopg2 cursor.description objects have .name
     return dict(zip(cols, row))
+
+
+
+def create_transcription_job(phone, gcs_path):
+    job_id = str(uuid.uuid4())
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO transcription_jobs (id, phone, gcs_path, status)
+            VALUES (%s, %s, %s, 'PENDING')
+        """, (job_id, phone, gcs_path))
+        conn.commit()
+
+    return job_id
+
+
+def get_transcription_job(job_id):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT id, phone, gcs_path, status
+            FROM transcription_jobs
+            WHERE id = %s
+        """, (job_id,))
+        row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "id": row[0],
+        "phone": row[1],
+        "gcs_path": row[2],
+        "status": row[3]
+    }
+
+
+
+def mark_job_processing(job_id):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            UPDATE transcription_jobs
+            SET status='PROCESSING', updated_at=NOW()
+            WHERE id=%s
+        """, (job_id,))
+        conn.commit()
+
+def mark_job_done(job_id):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            UPDATE transcription_jobs
+            SET status='DONE', updated_at=NOW()
+            WHERE id=%s
+        """, (job_id,))
+        conn.commit()
+
+
+def mark_job_failed(job_id, error):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            UPDATE transcription_jobs
+            SET status='FAILED', error=%s, updated_at=NOW()
+            WHERE id=%s
+        """, (error, job_id))
+        conn.commit()
+
+
 
 def init_db():
     """Create tables and helpful indexes if they don't exist."""
@@ -150,6 +217,10 @@ def init_db():
         # Optional: create index for quick lookup + dedupe enforcement (not strictly UNIQUE because some rows may be null)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_meeting_notes_message_sid ON meeting_notes (message_sid);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_payments_reference_id ON payments (reference_id);")
+
+        # Add conversational state columns (CRITICAL FOR MEMORY)
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS current_state VARCHAR(100);")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS state_metadata JSONB DEFAULT '{}';")
 
         # If you want to enforce uniqueness for non-null message_sid values (strong dedupe),
         # create a unique partial index:
@@ -729,6 +800,38 @@ def get_user_language(phone):
     user = get_user(phone)
     return user.get('preferred_language', 'hi') if user else 'hi'
 
+def update_user_language(phone: str, language_code: str):
+    """
+    Set or update the user's preferred language in the users table.
+    Returns the updated row as a dict (id, phone, language) or None on failure.
+    """
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            # Try to update existing user
+            cur.execute(
+                "UPDATE users SET language = %s WHERE phone = %s RETURNING id, phone, language",
+                (language_code, phone)
+            )
+            row = cur.fetchone()
+            if row:
+                conn.commit()
+                return {"id": row[0], "phone": row[1], "language": row[2]}
+
+            # If no existing row, insert new (safe fallback)
+            cur.execute(
+                "INSERT INTO users (phone, language) VALUES (%s, %s) RETURNING id, phone, language",
+                (phone, language_code)
+            )
+            row = cur.fetchone()
+            conn.commit()
+            if row:
+                return {"id": row[0], "phone": row[1], "language": row[2]}
+
+    except Exception as e:
+        print("DB: update_user_language error:", e)
+    return None
+
+
 # SUBSCRIPTION TIER MANAGEMENT
 
 def get_user_subscription_tier(phone):
@@ -975,3 +1078,59 @@ def save_custom_reminder(phone, reminder_text, remind_at, source_meeting_id=None
         row = cur.fetchone()
         conn.commit()
         return dict(row) if row else None
+    
+
+# --- Conversational State Management (The Fix for "Amnesia") ---
+
+def set_user_state(phone, state, metadata=None):
+    """
+    Saves the user's current conversational state to the DB.
+    survives restarts.
+    """
+    phone = normalize_phone_for_db(phone)
+    if metadata is None:
+        metadata = {}
+        
+    with get_conn() as conn, conn.cursor() as cur:
+        # Ensure user exists first
+        get_or_create_user(phone)
+        
+        cur.execute("""
+            UPDATE users 
+            SET current_state = %s, 
+                state_metadata = %s 
+            WHERE phone = %s
+        """, (state, json.dumps(metadata), phone))
+        conn.commit()
+
+def get_user_state(phone):
+    """
+    Retrieves the user's state from the DB.
+    Returns (state_string, metadata_dict).
+    """
+    phone = normalize_phone_for_db(phone)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT current_state, state_metadata FROM users WHERE phone = %s", (phone,))
+        row = cur.fetchone()
+        
+        if row:
+            # Handle RealDictCursor or tuple
+            if isinstance(row, dict):
+                state = row.get('current_state')
+                meta = row.get('state_metadata')
+            else:
+                state = row[0]
+                meta = row[1]
+                
+            # Parse JSON if it comes back as a string (depends on driver)
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except:
+                    meta = {}
+            if meta is None:
+                meta = {}
+                
+            return state, meta
+        
+    return None, {}
