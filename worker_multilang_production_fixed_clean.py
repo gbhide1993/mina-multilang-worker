@@ -14,6 +14,8 @@ import tempfile
 import traceback
 import signal
 import subprocess
+from utils import send_whatsapp, transcribe_file_multilang
+
 
 # HTTP and auth
 import requests
