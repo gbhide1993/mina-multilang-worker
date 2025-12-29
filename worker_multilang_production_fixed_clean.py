@@ -19,6 +19,18 @@ import subprocess
 import requests
 from requests.auth import HTTPBasicAuth
 
+from db import (
+    get_transcription_job,
+    mark_job_processing,
+    mark_job_done,
+    mark_job_failed,
+    save_meeting_notes_with_sid
+)
+from google.cloud import storage
+import os
+import traceback
+
+
 # ---- Conversation State Management ----
 
 ALLOWED_PENDING_STATES = {
@@ -26,6 +38,53 @@ ALLOWED_PENDING_STATES = {
     "CLARIFY_INTENT",
     "CHOOSE_LANGUAGE"
 }
+
+def transcribe_audio(job_id):
+    job = get_transcription_job(job_id)
+
+    if not job:
+        return
+
+    mark_job_processing(job_id)
+
+    try:
+        # Download audio from GCS
+        client = storage.Client()
+        bucket_name, object_name = job["gcs_path"].replace(
+            "gs://", ""
+        ).split("/", 1)
+
+        blob = client.bucket(bucket_name).blob(object_name)
+
+        local_path = f"/tmp/{os.path.basename(object_name)}"
+        blob.download_to_filename(local_path)
+
+        # Transcribe (reuse your existing logic)
+        transcript = transcribe_file_multilang(local_path)
+
+        # Save as finalized memory
+        save_meeting_notes_with_sid(
+            phone=job["phone"],
+            note_text=transcript,
+            source="voice"
+        )
+
+        mark_job_done(job_id)
+
+        send_whatsapp(
+            job["phone"],
+            f"📝 Aapka note:\n\n{transcript}\n\nYaad rakh liya."
+        )
+
+    except Exception as e:
+        mark_job_failed(job_id, str(e))
+        send_whatsapp(
+            job["phone"],
+            "⚠️ Audio samajhne mein dikkat hui. Ek baar phir bol sakte ho?"
+        )
+        print("transcribe_audio failed:", traceback.format_exc())
+
+
 
 def set_pending_state(meeting_id, state):
     if state not in ALLOWED_PENDING_STATES:
