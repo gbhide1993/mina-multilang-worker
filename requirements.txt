@@ -17,6 +17,8 @@ python-dateutil
 Pillow
 pytesseract
 google-cloud-storage
+google-cloud-speech
+
 
 
 
